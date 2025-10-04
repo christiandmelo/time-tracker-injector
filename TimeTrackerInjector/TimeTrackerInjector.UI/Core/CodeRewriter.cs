@@ -12,10 +12,6 @@ using TimeTrackerInjector.UI.Core;
 
 namespace TimeTrackerInjector.UI.Core
 {
-  /// <summary>
-  /// Reescreve o código das classes instrumentando chamadas de método e loops
-  /// com Stopwatches e logs hierárquicos.
-  /// </summary>
   public class CodeRewriter
   {
     private readonly TimeTrackerConfig _config;
@@ -26,9 +22,6 @@ namespace TimeTrackerInjector.UI.Core
       _config = config ?? throw new ArgumentNullException(nameof(config));
     }
 
-    /// <summary>
-    /// Executa a instrumentação em todos os arquivos pertencentes à cadeia de chamadas.
-    /// </summary>
     public async Task RewriteAsync(
         Compilation compilation,
         CallGraphNode callTreeRoot,
@@ -39,8 +32,6 @@ namespace TimeTrackerInjector.UI.Core
         return;
 
       var entryClass = entryMethod.ContainingType;
-      var entryClassName = entryClass?.Name ?? string.Empty;
-
       var involvedClasses = new HashSet<string>(
           methods.Select(m => m.ClassName),
           StringComparer.Ordinal);
@@ -225,9 +216,15 @@ namespace TimeTrackerInjector.UI.Core
           return base.VisitMethodDeclaration(node);
 
         _isInEntryPublic = SymbolEqualityComparer.Default.Equals(_currentMethod, _entryMethod);
-
         _depth = 0;
         _log.Clear();
+
+        // 🧩 Skip métodos folha (sem chamadas internas no grafo)
+        bool hasChildren = _stopwatches.Keys.Any(s =>
+            SymbolEqualityComparer.Default.Equals(s.ContainingType, _currentClass) &&
+            s.Name != _currentMethod.Name);
+        if (!hasChildren && !_isInEntryPublic)
+          return node;
 
         var newBody = (BlockSyntax?)Visit(node.Body);
         if (newBody == null)
@@ -242,9 +239,6 @@ namespace TimeTrackerInjector.UI.Core
         return node.WithBody(newBody);
       }
 
-      // -------------------------------------------
-      // TRATA chamadas do tipo "Foo();"
-      // -------------------------------------------
       public override SyntaxNode? VisitExpressionStatement(ExpressionStatementSyntax node)
       {
         if (_depth >= MaxDepth)
@@ -276,15 +270,13 @@ namespace TimeTrackerInjector.UI.Core
           if (_isInEntryPublic)
             _log.Add(LogLine.Method(_depth + 1, targetSymbol.Name, qualified));
 
+          // Insere as linhas direto no bloco pai (sem gerar chaves extras)
           return SyntaxFactory.Block(start, node, stop);
         }
 
         return base.VisitExpressionStatement(node);
       }
 
-      // -------------------------------------------
-      // TRATA chamadas do tipo "var x = Foo();"
-      // -------------------------------------------
       public override SyntaxNode? VisitLocalDeclarationStatement(LocalDeclarationStatementSyntax node)
       {
         var decl = node.Declaration;
@@ -324,9 +316,43 @@ namespace TimeTrackerInjector.UI.Core
         return base.VisitLocalDeclarationStatement(node);
       }
 
-      // -------------------------------------------
-      // TRATA loops for/foreach/while
-      // -------------------------------------------
+      public override SyntaxNode? VisitReturnStatement(ReturnStatementSyntax node)
+      {
+        if (node.Expression is not InvocationExpressionSyntax invocation)
+          return base.VisitReturnStatement(node);
+
+        var info = _semantic.GetSymbolInfo(invocation);
+        var targetSymbol = info.Symbol as IMethodSymbol
+            ?? info.CandidateSymbols.OfType<IMethodSymbol>().FirstOrDefault();
+
+        if (targetSymbol == null)
+          return base.VisitReturnStatement(node);
+
+        var ns = targetSymbol.ContainingNamespace?.ToString() ?? "";
+        if (ns.StartsWith("System") || ns.StartsWith("Microsoft"))
+          return base.VisitReturnStatement(node);
+
+        if (_stopwatches.TryGetValue(targetSymbol.OriginalDefinition, out var swInfo) ||
+            _stopwatches.TryGetValue(targetSymbol, out swInfo))
+        {
+          var qualified = $"{_entryMethod.ContainingType.ToDisplayString(SymbolDisplayFormat.MinimallyQualifiedFormat)}.{swInfo.FieldName}";
+          var start = SyntaxFactory.ParseStatement($"{qualified}.Start();");
+          var stop = SyntaxFactory.ParseStatement($"{qualified}.Stop();");
+          var tempVar = SyntaxFactory.IdentifierName("__ret");
+          var decl = SyntaxFactory.ParseStatement($"var {tempVar.Identifier.Text} = {invocation};");
+          var ret = SyntaxFactory.ParseStatement($"return {tempVar.Identifier.Text};");
+
+          _logCallback?.Invoke($"[MODIFY] {targetSymbol.ContainingType.Name}.{targetSymbol.Name} (Return - {Path.GetFileName(_filePath)})");
+
+          if (_isInEntryPublic)
+            _log.Add(LogLine.Method(_depth + 1, targetSymbol.Name, qualified));
+
+          return SyntaxFactory.Block(start, decl, stop, ret);
+        }
+
+        return base.VisitReturnStatement(node);
+      }
+
       public override SyntaxNode? VisitForStatement(ForStatementSyntax node) => RewriteLoop(node, node.Statement);
       public override SyntaxNode? VisitForEachStatement(ForEachStatementSyntax node) => RewriteLoop(node, node.Statement);
       public override SyntaxNode? VisitWhileStatement(WhileStatementSyntax node) => RewriteLoop(node, node.Statement);
