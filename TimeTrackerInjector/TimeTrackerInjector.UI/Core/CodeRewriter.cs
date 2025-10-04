@@ -202,39 +202,34 @@ namespace TimeTrackerInjector.UI.Core
       }
 
       // ---------- INVOCATIONS ----------
-
-      public override SyntaxNode? VisitInvocationExpression(InvocationExpressionSyntax node)
+      public override SyntaxNode? VisitExpressionStatement(ExpressionStatementSyntax node)
       {
-        var targetSymbol = _semantic.GetSymbolInfo(node).Symbol as IMethodSymbol;
-        if (targetSymbol == null) return base.VisitInvocationExpression(node);
-
-        // Apenas métodos que estão no registro (parte da árvore)
-        if (!_stopwatches.TryGetValue(targetSymbol.OriginalDefinition, out var swInfo) &&
-            !_stopwatches.TryGetValue(targetSymbol, out swInfo))
-          return base.VisitInvocationExpression(node);
-
-        // Vamos reescrever o statement que contém a invocation
-        if (node.Parent is not ExpressionStatementSyntax originalStmt)
-          return base.VisitInvocationExpression(node);
-
-        // Qualificação de acesso ao campo: TipoDeclarador.Field
-        var qualified = $"{swInfo.DeclaringClassName}.{swInfo.FieldName}";
-        var startStmt = SyntaxFactory.ParseStatement($"{qualified}.Start();");
-        var stopStmt = SyntaxFactory.ParseStatement($"{qualified}.Stop();");
-
-        // Coleta para o log hierárquico no entry
-        if (_isInEntryPublic)
+        // Detecta se o statement é uma chamada de método (InvocationExpression)
+        if (node.Expression is InvocationExpressionSyntax invocation)
         {
-          _log.Add(LogLine.Method(_depth + 1, targetSymbol.Name, qualified));
+          var targetSymbol = _semantic.GetSymbolInfo(invocation).Symbol as IMethodSymbol;
+          if (targetSymbol != null &&
+              (_stopwatches.TryGetValue(targetSymbol.OriginalDefinition, out var swInfo) ||
+               _stopwatches.TryGetValue(targetSymbol, out swInfo)))
+          {
+            // Qualifica o Stopwatch
+            var qualified = $"{swInfo.DeclaringClassName}.{swInfo.FieldName}";
+            var startStmt = SyntaxFactory.ParseStatement($"{qualified}.Start();");
+            var stopStmt = SyntaxFactory.ParseStatement($"{qualified}.Stop();");
+
+            // Adiciona entrada no log, se estivermos no método público de entrada
+            if (_isInEntryPublic)
+              _log.Add(LogLine.Method(_depth + 1, targetSymbol.Name, qualified));
+
+            // Retorna bloco com Start + chamada original + Stop
+            return SyntaxFactory.Block(startStmt, node, stopStmt);
+          }
         }
 
-        // Visita a invocation para eventuais reescritas internas primeiro
-        var visitedInvocation = (InvocationExpressionSyntax?)base.VisitInvocationExpression(node) ?? node;
-        var visitedStmt = originalStmt.WithExpression(visitedInvocation);
-
-        // Bloco: Start(); <call>; Stop();
-        return SyntaxFactory.Block(startStmt, visitedStmt, stopStmt);
+        // Se não for uma chamada de método alvo, segue o fluxo normal
+        return base.VisitExpressionStatement(node);
       }
+
 
       // ---------- LOOPS ----------
 

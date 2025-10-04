@@ -61,6 +61,7 @@ namespace TimeTrackerInjector.UI
 
         AppendLog($"Análise concluída. {result.Methods.Count} métodos encontrados.");
         AppendLog("Você pode revisar os arquivos e clicar em 'Confirmar Alterações'.");
+        btnConfirmarAlteracoes.Enabled = true;
       }
       catch (Exception ex)
       {
