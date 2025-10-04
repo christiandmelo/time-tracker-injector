@@ -13,22 +13,12 @@ using TimeTrackerInjector.UI.Core;
 namespace TimeTrackerInjector.UI.Core
 {
   /// <summary>
-  /// CodeRewriter: responsável por modificar os arquivos C# e injetar medições de tempo.
-  /// 
-  /// 🔧 Funcionalidades principais:
-  /// - Cria Stopwatches (campos) no topo da classe base.
-  /// - Injeta Start/Stop em torno de chamadas relevantes em todas as classes do grafo.
-  /// - Mantém loops originais, adicionando Start/Stop dentro do corpo.
-  /// - Adiciona bloco de log hierárquico no método público de entrada.
-  /// - Gera eventos de log (para exibição no MainForm).
+  /// Reescreve o código das classes instrumentando chamadas de método e loops
+  /// com Stopwatches e logs hierárquicos.
   /// </summary>
   public class CodeRewriter
   {
     private readonly TimeTrackerConfig _config;
-
-    /// <summary>
-    /// Evento para notificar o MainForm sobre modificações realizadas nos arquivos.
-    /// </summary>
     public event Action<string>? OnLog;
 
     public CodeRewriter(TimeTrackerConfig config)
@@ -37,7 +27,7 @@ namespace TimeTrackerInjector.UI.Core
     }
 
     /// <summary>
-    /// Executa a instrumentação em todos os arquivos pertencentes à classe base e às classes do grafo de chamadas.
+    /// Executa a instrumentação em todos os arquivos pertencentes à cadeia de chamadas.
     /// </summary>
     public async Task RewriteAsync(
         Compilation compilation,
@@ -51,7 +41,6 @@ namespace TimeTrackerInjector.UI.Core
       var entryClass = entryMethod.ContainingType;
       var entryClassName = entryClass?.Name ?? string.Empty;
 
-      // Cria lista de classes e arquivos envolvidos no grafo
       var involvedClasses = new HashSet<string>(
           methods.Select(m => m.ClassName),
           StringComparer.Ordinal);
@@ -63,7 +52,6 @@ namespace TimeTrackerInjector.UI.Core
           .Distinct()
           .ToList();
 
-      // Cria stopwatches (campos) – sempre atribuídos à classe base
       var stopwatchByMethod = BuildStopwatchRegistry(callTreeRoot, entryClass);
 
       foreach (var filePath in involvedFiles)
@@ -83,15 +71,11 @@ namespace TimeTrackerInjector.UI.Core
         var rewriter = new DeepHierarchyRewriter(model, stopwatchByMethod, entryMethod, filePath, OnLog);
         var newRoot = (CompilationUnitSyntax)rewriter.Visit(root);
 
-        // Salva o arquivo diretamente (sem backup)
         var newCode = newRoot.NormalizeWhitespace().ToFullString();
         await File.WriteAllTextAsync(filePath, newCode, Encoding.UTF8);
       }
     }
 
-    /// <summary>
-    /// Cria dicionário de Stopwatches (um por método) — os campos são sempre declarados na classe base.
-    /// </summary>
     private static Dictionary<IMethodSymbol, StopwatchInfo> BuildStopwatchRegistry(CallGraphNode root, INamedTypeSymbol? entryClass)
     {
       var dict = new Dictionary<IMethodSymbol, StopwatchInfo>(SymbolEqualityComparer.Default);
@@ -152,7 +136,6 @@ namespace TimeTrackerInjector.UI.Core
         _filePath = filePath;
         _logCallback = onLog;
 
-        // Todas as classes que contêm métodos do grafo (ex: ProcessService, DataService, etc.)
         _classesInGraph = new HashSet<INamedTypeSymbol>(
             stopwatches.Keys
                 .Select(k => k.ContainingType)
@@ -164,19 +147,16 @@ namespace TimeTrackerInjector.UI.Core
       {
         _currentClass = _semantic.GetDeclaredSymbol(node);
 
-        // Se a classe não faz parte do grafo → não altera
         if (_currentClass == null || !_classesInGraph.Contains(_currentClass))
           return base.VisitClassDeclaration(node);
 
         var visitedMembers = node.Members.Select(m => (MemberDeclarationSyntax)Visit(m) ?? m).ToList();
 
-        // Adiciona campos de Stopwatch apenas na classe base
         if (!SymbolEqualityComparer.Default.Equals(_currentClass, _entryMethod.ContainingType))
           return node.WithMembers(SyntaxFactory.List(visitedMembers));
 
         var fieldDecls = new List<MemberDeclarationSyntax>();
 
-        // Campos de métodos
         foreach (var kv in _stopwatches)
         {
           var fieldDecl =
@@ -203,7 +183,6 @@ namespace TimeTrackerInjector.UI.Core
           fieldDecls.Add(fieldDecl);
         }
 
-        // Campos de loops (descobertos durante visita)
         foreach (var loop in _loopFieldsToAdd.Distinct())
         {
           var loopDecl =
@@ -233,18 +212,15 @@ namespace TimeTrackerInjector.UI.Core
         var finalMembers = new List<MemberDeclarationSyntax>(fieldDecls.Count + visitedMembers.Count);
         finalMembers.AddRange(fieldDecls);
         finalMembers.AddRange(visitedMembers);
-
         return node.WithMembers(SyntaxFactory.List(finalMembers));
       }
 
       public override SyntaxNode? VisitMethodDeclaration(MethodDeclarationSyntax node)
       {
         _currentMethod = _semantic.GetDeclaredSymbol(node);
-
         if (_currentMethod == null)
           return base.VisitMethodDeclaration(node);
 
-        // Só processa métodos que estão dentro das classes do grafo
         if (_currentClass == null || !_classesInGraph.Contains(_currentClass))
           return base.VisitMethodDeclaration(node);
 
@@ -266,6 +242,9 @@ namespace TimeTrackerInjector.UI.Core
         return node.WithBody(newBody);
       }
 
+      // -------------------------------------------
+      // TRATA chamadas do tipo "Foo();"
+      // -------------------------------------------
       public override SyntaxNode? VisitExpressionStatement(ExpressionStatementSyntax node)
       {
         if (_depth >= MaxDepth)
@@ -281,14 +260,10 @@ namespace TimeTrackerInjector.UI.Core
         if (targetSymbol == null)
           return base.VisitExpressionStatement(node);
 
-        // Ignora chamadas externas irrelevantes
         var ns = targetSymbol.ContainingNamespace?.ToString() ?? "";
-        var type = targetSymbol.ContainingType?.Name ?? "";
-
-        if (ns.StartsWith("System") || ns.StartsWith("Microsoft") || type.Contains("LogService"))
+        if (ns.StartsWith("System") || ns.StartsWith("Microsoft"))
           return base.VisitExpressionStatement(node);
 
-        // Apenas métodos que estão no grafo são instrumentados
         if (_stopwatches.TryGetValue(targetSymbol.OriginalDefinition, out var swInfo) ||
             _stopwatches.TryGetValue(targetSymbol, out swInfo))
         {
@@ -307,6 +282,51 @@ namespace TimeTrackerInjector.UI.Core
         return base.VisitExpressionStatement(node);
       }
 
+      // -------------------------------------------
+      // TRATA chamadas do tipo "var x = Foo();"
+      // -------------------------------------------
+      public override SyntaxNode? VisitLocalDeclarationStatement(LocalDeclarationStatementSyntax node)
+      {
+        var decl = node.Declaration;
+        if (decl == null || decl.Variables.Count != 1)
+          return base.VisitLocalDeclarationStatement(node);
+
+        var variable = decl.Variables[0];
+        if (variable.Initializer?.Value is not InvocationExpressionSyntax invocation)
+          return base.VisitLocalDeclarationStatement(node);
+
+        var info = _semantic.GetSymbolInfo(invocation);
+        var targetSymbol = info.Symbol as IMethodSymbol
+                        ?? info.CandidateSymbols.OfType<IMethodSymbol>().FirstOrDefault();
+
+        if (targetSymbol == null)
+          return base.VisitLocalDeclarationStatement(node);
+
+        var ns = targetSymbol.ContainingNamespace?.ToString() ?? "";
+        if (ns.StartsWith("System") || ns.StartsWith("Microsoft"))
+          return base.VisitLocalDeclarationStatement(node);
+
+        if (_stopwatches.TryGetValue(targetSymbol.OriginalDefinition, out var swInfo) ||
+            _stopwatches.TryGetValue(targetSymbol, out swInfo))
+        {
+          var qualified = $"{_entryMethod.ContainingType.ToDisplayString(SymbolDisplayFormat.MinimallyQualifiedFormat)}.{swInfo.FieldName}";
+          var start = SyntaxFactory.ParseStatement($"{qualified}.Start();");
+          var stop = SyntaxFactory.ParseStatement($"{qualified}.Stop();");
+
+          _logCallback?.Invoke($"[MODIFY] {targetSymbol.ContainingType.Name}.{targetSymbol.Name} (LocalDeclaration - {Path.GetFileName(_filePath)})");
+
+          if (_isInEntryPublic)
+            _log.Add(LogLine.Method(_depth + 1, targetSymbol.Name, qualified));
+
+          return SyntaxFactory.Block(start, node, stop);
+        }
+
+        return base.VisitLocalDeclarationStatement(node);
+      }
+
+      // -------------------------------------------
+      // TRATA loops for/foreach/while
+      // -------------------------------------------
       public override SyntaxNode? VisitForStatement(ForStatementSyntax node) => RewriteLoop(node, node.Statement);
       public override SyntaxNode? VisitForEachStatement(ForEachStatementSyntax node) => RewriteLoop(node, node.Statement);
       public override SyntaxNode? VisitWhileStatement(WhileStatementSyntax node) => RewriteLoop(node, node.Statement);
