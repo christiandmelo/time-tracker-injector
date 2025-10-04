@@ -1,106 +1,127 @@
 using System;
-using System.Windows.Forms;
+using System.Collections.Generic;
+using System.IO;
+using System.Linq;
 using System.Threading.Tasks;
-using TimeTrackerInjector.UI.Core;
+using System.Windows.Forms;
 using TimeTrackerInjector.UI.Config;
+using TimeTrackerInjector.UI.Core;
 
 namespace TimeTrackerInjector.UI
 {
   public partial class MainForm : Form
   {
     private readonly ConfigurationManager _configManager;
-    private IReadOnlyList<AnalyzedMethod>? methods;
+    private List<AnalyzedMethod> _methods = new();
 
     public MainForm()
     {
       InitializeComponent();
       _configManager = new ConfigurationManager();
+      _configManager.Load();
     }
 
+    //abre o form de configuração
     private void configuraçãoToolStripMenuItem_Click(object sender, EventArgs e)
     {
-      using var configForm = new ConfigForm(_configManager);
-      if (configForm.ShowDialog(this) == DialogResult.OK)
-      {
-        _configManager.Load();
-        AppendLog("Configuração atualizada com sucesso.");
-      }
+      using var form = new ConfigForm(_configManager);
+      form.ShowDialog();
     }
 
+    //executa análise da solution
     private async void btnExecutar_Click(object sender, EventArgs e)
     {
       try
       {
-        btnExecutar.Enabled = false;
-        btnConfirmarAlteracoes.Enabled = false;
-
         AppendLog("Iniciando análise da solution...");
-        var analyzer = new SolutionAnalyzer(_configManager.Current);
-        methods = await analyzer.AnalyzeAsync();
 
-        gridArquivos.Rows.Clear();
-        foreach (var m in methods)
+        var cfg = _configManager.Current;
+        if (string.IsNullOrWhiteSpace(cfg.SolutionFile))
         {
-          gridArquivos.Rows.Add(m.ProjectName, m.ClassName, m.MethodName, m.FilePath);
-          AppendLog($"Método encontrado: {m.ClassName}.{m.MethodName}");
+          AppendLog("Nenhuma solution configurada.");
+          return;
         }
 
-        AppendLog($"Análise concluída. {methods.Count} método(s) localizado(s).");
-        tabControlMain.SelectedTab = tabArquivos;
-        btnConfirmarAlteracoes.Enabled = methods.Count > 0;
+        var analyzer = new SolutionAnalyzer(cfg);
+        var result = await analyzer.AnalyzeAsync();
+
+        if (result.Methods.Count == 0)
+        {
+          AppendLog("Nenhum método encontrado.");
+          return;
+        }
+
+        _methods = result.Methods;
+
+        gridArquivos.Rows.Clear();
+        foreach (var method in _methods.OrderBy(m => m.FilePath))
+        {
+          gridArquivos.Rows.Add(method.FilePath, method.MethodName, "Aguardando");
+        }
+
+        AppendLog($"Análise concluída. {result.Methods.Count} métodos encontrados.");
+        AppendLog("Você pode revisar os arquivos e clicar em 'Confirmar Alterações'.");
       }
       catch (Exception ex)
       {
-        AppendLog($"[ERRO] {ex.Message}");
-        MessageBox.Show($"Erro durante a análise:\n{ex.Message}", "Erro", MessageBoxButtons.OK, MessageBoxIcon.Error);
-      }
-      finally
-      {
-        btnExecutar.Enabled = true;
+        AppendLog($"Erro: {ex.Message}");
       }
     }
 
-    private void btnConfirmarAlteracoes_Click(object sender, EventArgs e)
+    // confirma e aplica instrumentação
+    private async void btnConfirmar_Click(object sender, EventArgs e)
     {
-      if (gridArquivos.Rows.Count == 0)
+      try
       {
-        MessageBox.Show("Nenhum arquivo foi identificado para modificação.",
-            "Time Tracker Injector", MessageBoxButtons.OK, MessageBoxIcon.Warning);
-        return;
+        if (_methods == null || _methods.Count == 0)
+        {
+          AppendLog("Nenhum método analisado para instrumentar.");
+          return;
+        }
+
+        var cfg = _configManager.Current;
+        AppendLog("Iniciando instrumentação profunda...");
+
+        // 1?Analisar novamente para obter Compilation e EntrySymbol
+        var analyzer = new SolutionAnalyzer(cfg);
+        var result = await analyzer.AnalyzeAsync();
+
+        var compilation = result.Compilation;
+        var entryMethod = result.EntryMethod;
+        if (compilation == null || entryMethod == null)
+        {
+          AppendLog("Não foi possível localizar o método de entrada configurado.");
+          return;
+        }
+
+        // 2?Construir a árvore de chamadas
+        var graphBuilder = new CallGraphBuilder(compilation);
+        var rootNode = await graphBuilder.BuildTreeAsync(entryMethod);
+        AppendLog("Árvore de chamadas construída com sucesso.");
+
+        // 3?Executar o CodeRewriter com hierarquia profunda
+        var rewriter = new CodeRewriter(cfg);
+        await rewriter.RewriteAsync(compilation, rootNode, result.Methods, entryMethod);
+
+        // 4?Atualizar a grid
+        foreach (DataGridViewRow row in gridArquivos.Rows)
+          row.Cells[2].Value = "Modificado";
+
+        AppendLog("Instrumentação concluída com sucesso!");
+        tabControlMain.SelectedTab = tabLog;
       }
-
-      var confirm = MessageBox.Show(
-          "Deseja realmente aplicar as alterações nos arquivos listados?",
-          "Confirmar Alterações",
-          MessageBoxButtons.YesNo,
-          MessageBoxIcon.Question
-      );
-
-      if (confirm != DialogResult.Yes)
-        return;
-
-      btnConfirmarAlteracoes.Enabled = false;
-      AppendLog("Iniciando injeção de Stopwatchs e logs nos métodos selecionados...");
-
-      // Simulação - futuramente aqui chamaremos o CodeRewriter
-      Task.Run(async () =>
+      catch (Exception ex)
       {
-        var rewriter = new CodeRewriter(_configManager.Current);
-        // 'methods' é a lista retornada pelo SolutionAnalyzer (já preenchendo a aba 1)
-        await rewriter.RewriteAsync(methods, _configManager.Current.MethodName);
-        AppendLog("Instrumentação concluída com sucesso.");
-        AppendLog($"Arquivos atualizados: {gridArquivos.Rows.Count}");
-        AppendLog("-------------------------------------------");
-        Invoke(() => btnConfirmarAlteracoes.Enabled = true);
-        Invoke(() => tabControlMain.SelectedTab = tabLog);
-      });
+        AppendLog($"Erro durante instrumentação: {ex.Message}");
+      }
     }
 
+    //loga mensagens na aba de logs
     private void AppendLog(string message)
     {
-      if (txtLog.InvokeRequired)
+      if (InvokeRequired)
       {
-        txtLog.Invoke(new Action(() => AppendLog(message)));
+        Invoke(new Action(() => AppendLog(message)));
         return;
       }
 

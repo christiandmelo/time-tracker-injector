@@ -28,10 +28,9 @@
       tabArquivos = new TabPage();
       gridArquivos = new DataGridView();
       btnConfirmarAlteracoes = new Button();
-      dataGridViewTextBoxColumn1 = new DataGridViewTextBoxColumn();
-      dataGridViewTextBoxColumn2 = new DataGridViewTextBoxColumn();
-      dataGridViewTextBoxColumn3 = new DataGridViewTextBoxColumn();
-      dataGridViewTextBoxColumn4 = new DataGridViewTextBoxColumn();
+      this.colArquivo = new System.Windows.Forms.DataGridViewTextBoxColumn();
+      this.colMetodos = new System.Windows.Forms.DataGridViewTextBoxColumn();
+      this.colStatus = new System.Windows.Forms.DataGridViewTextBoxColumn();
       tabLog = new TabPage();
       txtLog = new TextBox();
       menuStrip1.SuspendLayout();
@@ -94,7 +93,10 @@
       gridArquivos.Anchor = AnchorStyles.Top | AnchorStyles.Bottom | AnchorStyles.Left | AnchorStyles.Right;
       gridArquivos.AutoSizeColumnsMode = DataGridViewAutoSizeColumnsMode.Fill;
       gridArquivos.ColumnHeadersHeightSizeMode = DataGridViewColumnHeadersHeightSizeMode.AutoSize;
-      gridArquivos.Columns.AddRange(new DataGridViewColumn[] { dataGridViewTextBoxColumn1, dataGridViewTextBoxColumn2, dataGridViewTextBoxColumn3, dataGridViewTextBoxColumn4 });
+      gridArquivos.Columns.AddRange(new System.Windows.Forms.DataGridViewColumn[] {
+            this.colArquivo,
+            this.colMetodos,
+            this.colStatus});
       gridArquivos.Location = new Point(0, 0);
       gridArquivos.Name = "gridArquivos";
       gridArquivos.ReadOnly = true;
@@ -111,35 +113,31 @@
       btnConfirmarAlteracoes.Size = new Size(952, 40);
       btnConfirmarAlteracoes.TabIndex = 1;
       btnConfirmarAlteracoes.Text = "Confirmar Alterações";
-      btnConfirmarAlteracoes.Click += btnConfirmarAlteracoes_Click;
+      btnConfirmarAlteracoes.Click += btnConfirmar_Click;
       // 
-      // dataGridViewTextBoxColumn1
+      // colArquivo
       // 
-      dataGridViewTextBoxColumn1.HeaderText = "Projeto";
-      dataGridViewTextBoxColumn1.MinimumWidth = 6;
-      dataGridViewTextBoxColumn1.Name = "dataGridViewTextBoxColumn1";
-      dataGridViewTextBoxColumn1.ReadOnly = true;
+      this.colArquivo.HeaderText = "Arquivo";
+      this.colArquivo.MinimumWidth = 6;
+      this.colArquivo.Name = "colArquivo";
+      this.colArquivo.ReadOnly = true;
+      this.colArquivo.Width = 550;
       // 
-      // dataGridViewTextBoxColumn2
+      // colMetodos
       // 
-      dataGridViewTextBoxColumn2.HeaderText = "Classe";
-      dataGridViewTextBoxColumn2.MinimumWidth = 6;
-      dataGridViewTextBoxColumn2.Name = "dataGridViewTextBoxColumn2";
-      dataGridViewTextBoxColumn2.ReadOnly = true;
+      this.colMetodos.HeaderText = "Métodos";
+      this.colMetodos.MinimumWidth = 6;
+      this.colMetodos.Name = "colMetodos";
+      this.colMetodos.ReadOnly = true;
+      this.colMetodos.Width = 125;
       // 
-      // dataGridViewTextBoxColumn3
+      // colStatus
       // 
-      dataGridViewTextBoxColumn3.HeaderText = "Método";
-      dataGridViewTextBoxColumn3.MinimumWidth = 6;
-      dataGridViewTextBoxColumn3.Name = "dataGridViewTextBoxColumn3";
-      dataGridViewTextBoxColumn3.ReadOnly = true;
-      // 
-      // dataGridViewTextBoxColumn4
-      // 
-      dataGridViewTextBoxColumn4.HeaderText = "Arquivo";
-      dataGridViewTextBoxColumn4.MinimumWidth = 6;
-      dataGridViewTextBoxColumn4.Name = "dataGridViewTextBoxColumn4";
-      dataGridViewTextBoxColumn4.ReadOnly = true;
+      this.colStatus.HeaderText = "Status";
+      this.colStatus.MinimumWidth = 6;
+      this.colStatus.Name = "colStatus";
+      this.colStatus.ReadOnly = true;
+      this.colStatus.Width = 125;
       // 
       // tabLog
       // 
@@ -196,9 +194,8 @@
     private DataGridView gridArquivos;
     private Button btnConfirmarAlteracoes;
     private TextBox txtLog;
-    private DataGridViewTextBoxColumn dataGridViewTextBoxColumn1;
-    private DataGridViewTextBoxColumn dataGridViewTextBoxColumn2;
-    private DataGridViewTextBoxColumn dataGridViewTextBoxColumn3;
-    private DataGridViewTextBoxColumn dataGridViewTextBoxColumn4;
+    private System.Windows.Forms.DataGridViewTextBoxColumn colArquivo;
+    private System.Windows.Forms.DataGridViewTextBoxColumn colMetodos;
+    private System.Windows.Forms.DataGridViewTextBoxColumn colStatus;
   }
 }
