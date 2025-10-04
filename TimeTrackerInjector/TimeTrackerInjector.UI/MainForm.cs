@@ -102,6 +102,11 @@ namespace TimeTrackerInjector.UI
 
         // 3?Executar o CodeRewriter com hierarquia profunda
         var rewriter = new CodeRewriter(cfg);
+        rewriter.OnLog += (msg) =>
+        {
+          // Mostra na tela o log emitido pelo rewriter
+          AppendLog(msg);
+        };
         await rewriter.RewriteAsync(compilation, rootNode, result.Methods, entryMethod);
 
         // 4?Atualizar a grid
