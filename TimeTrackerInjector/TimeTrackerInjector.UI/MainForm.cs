@@ -9,6 +9,7 @@ namespace TimeTrackerInjector.UI
   public partial class MainForm : Form
   {
     private readonly ConfigurationManager _configManager;
+    private IReadOnlyList<AnalyzedMethod>? methods;
 
     public MainForm()
     {
@@ -35,7 +36,7 @@ namespace TimeTrackerInjector.UI
 
         AppendLog("Iniciando análise da solution...");
         var analyzer = new SolutionAnalyzer(_configManager.Current);
-        var methods = await analyzer.AnalyzeAsync();
+        methods = await analyzer.AnalyzeAsync();
 
         gridArquivos.Rows.Clear();
         foreach (var m in methods)
@@ -84,8 +85,10 @@ namespace TimeTrackerInjector.UI
       // Simulação - futuramente aqui chamaremos o CodeRewriter
       Task.Run(async () =>
       {
-        await Task.Delay(1500); // simula processamento
-        AppendLog("Instrumentação concluída com sucesso (simulação).");
+        var rewriter = new CodeRewriter(_configManager.Current);
+        // 'methods' é a lista retornada pelo SolutionAnalyzer (já preenchendo a aba 1)
+        await rewriter.RewriteAsync(methods, _configManager.Current.MethodName);
+        AppendLog("Instrumentação concluída com sucesso.");
         AppendLog($"Arquivos atualizados: {gridArquivos.Rows.Count}");
         AppendLog("-------------------------------------------");
         Invoke(() => btnConfirmarAlteracoes.Enabled = true);
