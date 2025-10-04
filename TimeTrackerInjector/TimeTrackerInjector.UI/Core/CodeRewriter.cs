@@ -13,10 +13,15 @@ using TimeTrackerInjector.UI.Core;
 namespace TimeTrackerInjector.UI.Core
 {
   /// <summary>
-  /// Reescreve o código criando campos de Stopwatch por método (na classe declaradora),
-  /// envolvendo invocações com Start/Stop qualificados pela classe do alvo,
-  /// e inserindo um único bloco logStopwatch no final do método público de entrada,
-  /// imprimindo toda a árvore de chamadas (hierarquia profunda) + loops detectados no entry.
+  /// Responsável por modificar o código-fonte C# para injetar:
+  ///  - Stopwatches em torno de chamadas de método relevantes
+  ///  - Contadores de tempo para loops (for, foreach, while)
+  ///  - Bloco de logStopwatch no final do método público principal
+  /// 
+  /// Ele respeita:
+  ///  - A classe base e método principal configurados (ex: ProcessService.ProcessAll)
+  ///  - Mantém a estrutura original dos loops
+  ///  - Ignora métodos externos, como System.* e LogService.*
   /// </summary>
   public class CodeRewriter
   {
@@ -27,48 +32,58 @@ namespace TimeTrackerInjector.UI.Core
       _config = config ?? throw new ArgumentNullException(nameof(config));
     }
 
-    /// <param name="compilation">Compilation do projeto.</param>
-    /// <param name="callTreeRoot">Árvore de chamadas do método raiz.</param>
-    /// <param name="methods">Lista de métodos analisados (para limitar arquivos).</param>
-    /// <param name="entryMethod">Símbolo do método público de entrada (onde o log será inserido).</param>
+    /// <summary>
+    /// Método principal que recebe o Compilation, a árvore de chamadas e a lista de métodos analisados.
+    /// Reescreve os arquivos injetando os blocos de Stopwatch e log.
+    /// </summary>
     public async Task RewriteAsync(
         Compilation compilation,
         CallGraphNode callTreeRoot,
         IReadOnlyList<AnalyzedMethod> methods,
         IMethodSymbol entryMethod)
     {
-      if (methods == null || methods.Count == 0) return;
+      if (methods == null || methods.Count == 0)
+        return;
 
-      // 1) Gera um registro Stopwatch por método (nome único e classe declaradora)
+      // Cria um registro de Stopwatches únicos para cada método do grafo
       var stopwatchByMethod = BuildStopwatchRegistry(callTreeRoot);
 
-      // 2) Por arquivo: reescrever com semantic model
       foreach (var group in methods
                    .Where(m => !string.IsNullOrWhiteSpace(m.FilePath))
                    .GroupBy(m => m.FilePath))
       {
         var filePath = group.Key;
-        if (!File.Exists(filePath)) continue;
+        if (!File.Exists(filePath))
+          continue;
 
-        var doc = compilation.SyntaxTrees.FirstOrDefault(t => t.FilePath == filePath);
-        if (doc == null) continue;
+        var tree = compilation.SyntaxTrees.FirstOrDefault(t => t.FilePath == filePath);
+        if (tree == null)
+          continue;
 
-        var model = compilation.GetSemanticModel(doc);
-        var root = (await doc.GetRootAsync()) as CompilationUnitSyntax;
-        if (root == null) continue;
+        var model = compilation.GetSemanticModel(tree);
+        var root = (await tree.GetRootAsync()) as CompilationUnitSyntax;
+        if (root == null)
+          continue;
 
+        // Instancia o rewriter com o contexto atual
         var rewriter = new DeepHierarchyRewriter(model, stopwatchByMethod, entryMethod);
         var newRoot = (CompilationUnitSyntax)rewriter.Visit(root);
 
-        // 3) Backup + persistência
+        // Gera código final formatado
         var newCode = newRoot.NormalizeWhitespace().ToFullString();
-        var backupPath = filePath + ".bak";
+
+        // Cria backup antes de sobrescrever
+        /*var backupPath = filePath + ".bak";
         if (!_config.OverwriteOriginal && !File.Exists(backupPath))
-          File.Copy(filePath, backupPath);
+          File.Copy(filePath, backupPath);*/
+
         await File.WriteAllTextAsync(filePath, newCode, Encoding.UTF8);
       }
     }
 
+    /// <summary>
+    /// Cria um dicionário com todos os métodos do grafo de chamadas e seus nomes de Stopwatch.
+    /// </summary>
     private static Dictionary<IMethodSymbol, StopwatchInfo> BuildStopwatchRegistry(CallGraphNode root)
     {
       var dict = new Dictionary<IMethodSymbol, StopwatchInfo>(SymbolEqualityComparer.Default);
@@ -79,16 +94,18 @@ namespace TimeTrackerInjector.UI.Core
         var sym = n.Symbol;
         if (!dict.ContainsKey(sym))
         {
-          var className = sym.ContainingType?.Name ?? "UnknownClass";
+          var className = sym.ContainingType?.ToDisplayString(SymbolDisplayFormat.MinimallyQualifiedFormat)
+                           ?? "UnknownClass";
           var cleanMethod = new string(sym.Name.Where(char.IsLetterOrDigit).ToArray());
           dict[sym] = new StopwatchInfo
           {
-            DeclaringClassName = sym.ContainingType?.ToDisplayString(SymbolDisplayFormat.MinimallyQualifiedFormat)
-                                   ?? className,
+            DeclaringClassName = className,
             FieldName = $"sw{counter++}_{cleanMethod}"
           };
         }
-        foreach (var c in n.Children) Walk(c);
+
+        foreach (var c in n.Children)
+          Walk(c);
       }
 
       Walk(root);
@@ -96,24 +113,19 @@ namespace TimeTrackerInjector.UI.Core
     }
 
     /// <summary>
-    /// Rewriter principal: injeta fields nas classes donas dos métodos;
-    /// envolve invocações com Start/Stop; adiciona bloco de log no método público raiz.
+    /// Classe interna responsável por visitar e modificar a árvore sintática do Roslyn.
     /// </summary>
     private sealed class DeepHierarchyRewriter : CSharpSyntaxRewriter
     {
       private readonly SemanticModel _semantic;
       private readonly Dictionary<IMethodSymbol, StopwatchInfo> _stopwatches;
       private readonly IMethodSymbol _entryMethod;
-
-      // Estado por arquivo durante a visita
-      private readonly HashSet<string> _fieldsInjectedInThisClass = new(); // ClassName -> fields already inserted
       private INamedTypeSymbol? _currentClass;
       private IMethodSymbol? _currentMethod;
       private bool _isInEntryPublic;
       private int _depth;
+      private const int MaxDepth = 50;
       private readonly List<LogLine> _log = new();
-      private int _loopCounter = 1;
-      private readonly List<string> _loopFieldNames = new();
 
       public DeepHierarchyRewriter(
           SemanticModel semantic,
@@ -125,23 +137,26 @@ namespace TimeTrackerInjector.UI.Core
         _entryMethod = entryMethod;
       }
 
+      /// <summary>
+      /// Ao visitar uma classe, cria os Stopwatches somente na classe base configurada.
+      /// </summary>
       public override SyntaxNode? VisitClassDeclaration(ClassDeclarationSyntax node)
       {
         _currentClass = _semantic.GetDeclaredSymbol(node);
-        var visitedMembers = node.Members.Select(m => (MemberDeclarationSyntax)Visit(m) ?? m).ToList();
 
-        // Campos Stopwatch que pertencem a esta classe
+        // Se não for a classe configurada (ex: ProcessService), pula.
+        if (!SymbolEqualityComparer.Default.Equals(_currentClass, _entryMethod.ContainingType))
+          return base.VisitClassDeclaration(node);
+
+        var visitedMembers = node.Members.Select(m => (MemberDeclarationSyntax)Visit(m) ?? m).ToList();
         var fieldsToAdd = new List<MemberDeclarationSyntax>();
 
+        // Cria apenas os campos Stopwatch dessa classe
         foreach (var kv in _stopwatches)
         {
           var owner = kv.Key.ContainingType;
           if (owner == null) continue;
           if (!SymbolEqualityComparer.Default.Equals(owner, _currentClass)) continue;
-
-          var classNameKey = owner.ToDisplayString(SymbolDisplayFormat.MinimallyQualifiedFormat);
-          var uniqKey = $"{classNameKey}.{kv.Value.FieldName}";
-          if (_fieldsInjectedInThisClass.Contains(uniqKey)) continue;
 
           var fieldDecl =
               SyntaxFactory.FieldDeclaration(
@@ -165,35 +180,37 @@ namespace TimeTrackerInjector.UI.Core
                   SyntaxFactory.Token(SyntaxKind.ReadOnlyKeyword)));
 
           fieldsToAdd.Add(fieldDecl);
-          _fieldsInjectedInThisClass.Add(uniqKey);
         }
 
-        if (fieldsToAdd.Count == 0) return node.WithMembers(SyntaxFactory.List(visitedMembers));
+        // Adiciona os novos fields no topo da classe
+        if (fieldsToAdd.Count == 0)
+          return node.WithMembers(SyntaxFactory.List(visitedMembers));
 
-        // Insere no topo da classe
-        var finalMembers = new List<MemberDeclarationSyntax>(fieldsToAdd.Count + visitedMembers.Count);
+        var finalMembers = new List<MemberDeclarationSyntax>();
         finalMembers.AddRange(fieldsToAdd);
         finalMembers.AddRange(visitedMembers);
         return node.WithMembers(SyntaxFactory.List(finalMembers));
       }
 
+      /// <summary>
+      /// Para cada método, detecta se é o método de entrada configurado.
+      /// Caso seja, injeta o bloco de logStopwatch ao final.
+      /// </summary>
       public override SyntaxNode? VisitMethodDeclaration(MethodDeclarationSyntax node)
       {
         _currentMethod = _semantic.GetDeclaredSymbol(node);
-        _isInEntryPublic = SymbolEqualityComparer.Default.Equals(_currentMethod, _entryMethod) &&
-                           node.Modifiers.Any(m => m.IsKind(SyntaxKind.PublicKeyword));
+        _isInEntryPublic = SymbolEqualityComparer.Default.Equals(_currentMethod, _entryMethod);
 
         _depth = 0;
         _log.Clear();
-        _loopCounter = 1;
-        _loopFieldNames.Clear();
 
         var newBody = (BlockSyntax?)Visit(node.Body);
-        if (newBody == null) return node;
+        if (newBody == null)
+          return node;
 
+        // Apenas o método principal recebe o bloco de log ao final
         if (_isInEntryPublic)
         {
-          // Gera bloco logStopwatch (profundo) com base no que foi coletado
           var statements = BuildLogStatements(node.Identifier.Text);
           newBody = newBody.AddStatements(statements.ToArray());
         }
@@ -201,83 +218,91 @@ namespace TimeTrackerInjector.UI.Core
         return node.WithBody(newBody);
       }
 
-      // ---------- INVOCATIONS ----------
+      /// <summary>
+      /// Visita cada statement de expressão e adiciona Start/Stop apenas em chamadas de método relevantes.
+      /// Ignora métodos de LogService e namespaces System/Microsoft.
+      /// </summary>
       public override SyntaxNode? VisitExpressionStatement(ExpressionStatementSyntax node)
       {
-        // Detecta se o statement é uma chamada de método (InvocationExpression)
+        if (_depth >= MaxDepth)
+          return node;
+
         if (node.Expression is InvocationExpressionSyntax invocation)
         {
           var targetSymbol = _semantic.GetSymbolInfo(invocation).Symbol as IMethodSymbol;
-          if (targetSymbol != null &&
-              (_stopwatches.TryGetValue(targetSymbol.OriginalDefinition, out var swInfo) ||
-               _stopwatches.TryGetValue(targetSymbol, out swInfo)))
+
+          if (targetSymbol == null)
+            return base.VisitExpressionStatement(node);
+
+          // 🔸 Ignora métodos irrelevantes
+          if (targetSymbol.ContainingType == null ||
+              targetSymbol.ContainingType.Name.Contains("LogService") ||
+              targetSymbol.ContainingNamespace.ToString().StartsWith("System") ||
+              targetSymbol.ContainingNamespace.ToString().StartsWith("Microsoft"))
           {
-            // Qualifica o Stopwatch
+            return base.VisitExpressionStatement(node);
+          }
+
+          // 🔸 Apenas métodos do grafo serão instrumentados
+          if (_stopwatches.TryGetValue(targetSymbol, out var swInfo))
+          {
             var qualified = $"{swInfo.DeclaringClassName}.{swInfo.FieldName}";
             var startStmt = SyntaxFactory.ParseStatement($"{qualified}.Start();");
             var stopStmt = SyntaxFactory.ParseStatement($"{qualified}.Stop();");
 
-            // Adiciona entrada no log, se estivermos no método público de entrada
             if (_isInEntryPublic)
               _log.Add(LogLine.Method(_depth + 1, targetSymbol.Name, qualified));
 
-            // Retorna bloco com Start + chamada original + Stop
+            // Retorna um bloco Start/Chamada/Stop sem recursão
             return SyntaxFactory.Block(startStmt, node, stopStmt);
           }
         }
 
-        // Se não for uma chamada de método alvo, segue o fluxo normal
         return base.VisitExpressionStatement(node);
       }
 
+      /// <summary>
+      /// Modifica loops sem alterar a estrutura (mantém for, foreach, while),
+      /// apenas injeta Start() e Stop() dentro do corpo.
+      /// </summary>
+      public override SyntaxNode? VisitForStatement(ForStatementSyntax node)
+          => RewriteLoop(node, node.Statement);
+      public override SyntaxNode? VisitForEachStatement(ForEachStatementSyntax node)
+          => RewriteLoop(node, node.Statement);
+      public override SyntaxNode? VisitWhileStatement(WhileStatementSyntax node)
+          => RewriteLoop(node, node.Statement);
 
-      // ---------- LOOPS ----------
-
-      public override SyntaxNode? VisitForStatement(ForStatementSyntax node) => RewriteLoop(node, node);
-      public override SyntaxNode? VisitForEachStatement(ForEachStatementSyntax node) => RewriteLoop(node, node);
-      public override SyntaxNode? VisitWhileStatement(WhileStatementSyntax node) => RewriteLoop(node, node);
-
-      private SyntaxNode RewriteLoop(SyntaxNode loopNode, StatementSyntax loopStmt)
+      private SyntaxNode RewriteLoop(SyntaxNode loopNode, StatementSyntax body)
       {
-        // Apenas coleta logs/fields de loop no método de entrada
-        string? loopSw = null;
-        if (_isInEntryPublic)
-        {
-          loopSw = $"swLoop_{_loopCounter++}";
-          _loopFieldNames.Add(loopSw);
-          _log.Add(LogLine.Loop(_depth + 1, loopSw));
-        }
+        if (_depth >= MaxDepth)
+          return loopNode;
+
+        string loopSw = $"swLoop_{_depth + 1}_{Guid.NewGuid():N}[..6]";
+        _log.Add(LogLine.Loop(_depth + 1, loopSw));
 
         _depth++;
-        var visited = (StatementSyntax?)base.Visit(loopStmt) ?? loopStmt;
+        var visitedBody = (StatementSyntax?)base.Visit(body) ?? body;
         _depth--;
-
-        if (loopSw == null) return visited;
-
-        // Campo de loop precisa existir na classe corrente. Se não existir, criaremos via cabeçalho de classe?
-        // Como loops são locais, vamos usar campo estático interno na classe de entrada também:
-        // (o campo será adicionado quando visitarmos a ClassDeclaration — aqui apenas usamos)
-        // Para garantir, vamos declarar como field no fim do método? Não é válido. Então a criação acontece no topo:
-        // --> A estratégia simples: não criar field de loop global aqui; usar var local.
-        // Porém precisamos acumular. Para simplificar, faremos var local com new Stopwatch():
-        // e acumularemos apenas nesse escopo.
-        // Como você quer acumulado geral, manteremos como local do método entry:
-        // Start/Stop englobando o laço.
 
         var start = SyntaxFactory.ParseStatement($"{loopSw}.Start();");
         var stop = SyntaxFactory.ParseStatement($"{loopSw}.Stop();");
 
-        // Declaração local do loopSw no início do bloco (se ainda não existir). Vamos inserir como 'var swLoop_X = new Stopwatch();'
-        // Para garantir, transformamos o visited em bloco, e prefixamos com a declaração.
-        var block = visited as BlockSyntax ?? SyntaxFactory.Block(visited);
-        var decl = SyntaxFactory.ParseStatement($"var {loopSw} = new System.Diagnostics.Stopwatch();");
+        var block = visitedBody as BlockSyntax ?? SyntaxFactory.Block(visitedBody);
+        var newBlock = block.WithStatements(block.Statements.Insert(0, start).Add(stop));
 
-        // Retorna: { var swLoop_X = new Stopwatch(); swLoop_X.Start(); <loop>; swLoop_X.Stop(); }
-        return SyntaxFactory.Block(decl, start, block, stop);
+        // Reconstrói o loop original preservando cabeçalho
+        return loopNode switch
+        {
+          ForStatementSyntax f => f.WithStatement(newBlock),
+          ForEachStatementSyntax fe => fe.WithStatement(newBlock),
+          WhileStatementSyntax w => w.WithStatement(newBlock),
+          _ => loopNode
+        };
       }
 
-      // ---------- LOG BUILD ----------
-
+      /// <summary>
+      /// Monta as linhas do logStopwatch hierárquico no final do método principal.
+      /// </summary>
       private IEnumerable<StatementSyntax> BuildLogStatements(string entryMethodName)
       {
         var stmts = new List<StatementSyntax>
@@ -296,7 +321,6 @@ namespace TimeTrackerInjector.UI.Core
           }
           else
           {
-            // Cabeçalho "Dentro do método" para cada método logo após sua primeira aparição
             stmts.Add(SyntaxFactory.ParseStatement(
                 $"logStopwatch.AppendLine($\"{bars}[Metodo: {l.MethodName}] Tempo: {{{l.StopwatchRef}.ElapsedMilliseconds}} ms - {{{l.StopwatchRef}.Elapsed}}\");"));
             stmts.Add(SyntaxFactory.ParseStatement(
@@ -307,6 +331,9 @@ namespace TimeTrackerInjector.UI.Core
         return stmts;
       }
 
+      /// <summary>
+      /// Representa uma linha de log hierárquico (método ou loop).
+      /// </summary>
       private sealed class LogLine
       {
         public int Depth { get; private set; }
@@ -318,7 +345,7 @@ namespace TimeTrackerInjector.UI.Core
             => new() { Depth = depth, MethodName = method, StopwatchRef = swRef, IsLoop = false };
 
         public static LogLine Loop(int depth, string swRef)
-            => new() { Depth = depth, MethodName = "", StopwatchRef = swRef, IsLoop = true };
+            => new() { Depth = depth, StopwatchRef = swRef, IsLoop = true };
       }
     }
   }
