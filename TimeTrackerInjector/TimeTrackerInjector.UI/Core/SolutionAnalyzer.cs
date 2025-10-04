@@ -69,7 +69,7 @@ namespace TimeTrackerInjector.UI.Core
       if (methodSymbol == null)
         throw new InvalidOperationException($"Método '{_config.MethodName}' não encontrado na classe '{_config.ClassName}'.");
 
-      // Adiciona o método base à lista
+      // Adiciona o método base
       _methodsFound.Add(new AnalyzedMethod
       {
         ClassName = classSymbol.Name,
@@ -78,11 +78,25 @@ namespace TimeTrackerInjector.UI.Core
         ProjectName = _config.ProjectName
       });
 
-      // No futuro: integração com CallGraphBuilder
+      // Se habilitado, realiza a análise recursiva de chamadas
       if (_config.Recursive)
       {
-        // Placeholder: Recursão para métodos chamados será feita pelo CallGraphBuilder
+        var callGraph = new CallGraphBuilder(compilation);
+        var relatedMethods = await callGraph.BuildAsync(methodSymbol);
+
+        // Adiciona apenas métodos únicos que não estão na lista
+        foreach (var m in relatedMethods)
+        {
+          if (!_methodsFound.Any(x =>
+              x.ClassName == m.ClassName &&
+              x.MethodName == m.MethodName &&
+              x.FilePath == m.FilePath))
+          {
+            _methodsFound.Add(m);
+          }
+        }
       }
+
 
       return _methodsFound;
     }
