@@ -7,9 +7,20 @@ using System.IO;
 using System.Linq;
 using System.Threading.Tasks;
 using TimeTrackerInjector.UI.Config;
+using TimeTrackerInjector.UI.Core;
 
 namespace TimeTrackerInjector.UI.Core
 {
+  /// <summary>
+  /// Analisa a solution C# e identifica os métodos que pertencem ao fluxo
+  /// iniciado pelo método principal configurado (ex.: ProcessService.ProcessAll).
+  /// 
+  /// Ele:
+  ///  - Carrega a solution e o projeto via Roslyn.
+  ///  - Identifica o método de entrada configurado.
+  ///  - Constrói o grafo de chamadas (CallGraphBuilder).
+  ///  - Retorna apenas os métodos e arquivos que fazem parte dessa cadeia.
+  /// </summary>
   public class SolutionAnalyzer
   {
     private readonly TimeTrackerConfig _config;
@@ -33,6 +44,7 @@ namespace TimeTrackerInjector.UI.Core
         Console.WriteLine($"[MSBuild] {e.Diagnostic}");
       };
 
+      // 🧩 Carrega a solution e o projeto alvo
       var solution = await workspace.OpenSolutionAsync(_config.SolutionFile);
       var project = GetTargetProject(solution, _config.ProjectName);
       if (project == null)
@@ -42,6 +54,7 @@ namespace TimeTrackerInjector.UI.Core
       if (compilation == null)
         throw new InvalidOperationException("Falha ao compilar o projeto.");
 
+      // 🧠 Lista temporária de todos os métodos (sem filtro)
       var analyzedMethods = new List<AnalyzedMethod>();
 
       foreach (var doc in project.Documents)
@@ -68,20 +81,43 @@ namespace TimeTrackerInjector.UI.Core
         }
       }
 
+      // 🧭 Encontra o método de entrada (classe + método definidos no config)
       var entryMethod = FindEntryMethod(compilation, _config.ClassName, _config.MethodName);
       if (entryMethod == null)
-      {
-        Console.WriteLine($"[WARN] Método de entrada '{_config.ClassName}.{_config.MethodName}' não encontrado.");
-      }
+        throw new InvalidOperationException($"Método de entrada '{_config.ClassName}.{_config.MethodName}' não encontrado.");
 
+      // 🔗 Constrói o grafo de chamadas
+      var builder = new CallGraphBuilder(compilation);
+      var rootNode = await builder.BuildTreeAsync(entryMethod);
+
+      // 🔄 Extrai todos os métodos do grafo (recursivamente)
+      var methodsInGraph = FlattenCallGraph(rootNode).ToHashSet(SymbolEqualityComparer.Default);
+
+      // 🔍 Filtra os métodos realmente relevantes (que estão no grafo)
+      var filtered = analyzedMethods
+          .Where(m => m.Symbol != null && methodsInGraph.Contains(m.Symbol))
+          .ToList();
+
+      // 🚫 Exclui padrões conhecidos e métodos "folha" que não chamam ninguém
+      var excludedPatterns = new[] { "Program", "Main", "LogService", "Write", "LoadItems" };
+      filtered = filtered
+          .Where(m => !excludedPatterns.Any(ex =>
+              m.ClassName.Contains(ex, StringComparison.OrdinalIgnoreCase) ||
+              m.MethodName.Contains(ex, StringComparison.OrdinalIgnoreCase)))
+          .ToList();
+
+      // 🧩 Retorna o resultado consolidado
       return new AnalyzeResult
       {
         Compilation = compilation,
         EntryMethod = entryMethod,
-        Methods = analyzedMethods
+        Methods = filtered
       };
     }
 
+    /// <summary>
+    /// Localiza o projeto configurado dentro da solution.
+    /// </summary>
     private Project? GetTargetProject(Solution solution, string? projectName)
     {
       if (string.IsNullOrWhiteSpace(projectName))
@@ -91,6 +127,9 @@ namespace TimeTrackerInjector.UI.Core
           string.Equals(p.Name, projectName, StringComparison.OrdinalIgnoreCase));
     }
 
+    /// <summary>
+    /// Localiza o método de entrada (Classe + Método) dentro da compilação.
+    /// </summary>
     private IMethodSymbol? FindEntryMethod(Compilation compilation, string? className, string? methodName)
     {
       if (string.IsNullOrWhiteSpace(className) || string.IsNullOrWhiteSpace(methodName))
@@ -117,8 +156,35 @@ namespace TimeTrackerInjector.UI.Core
 
       return null;
     }
+
+    /// <summary>
+    /// Retorna todos os métodos do grafo de chamadas (de forma recursiva).
+    /// </summary>
+    private static IEnumerable<IMethodSymbol> FlattenCallGraph(CallGraphNode root)
+    {
+      var list = new List<IMethodSymbol>();
+      var visited = new HashSet<IMethodSymbol>(SymbolEqualityComparer.Default);
+
+      void Walk(CallGraphNode node)
+      {
+        if (visited.Contains(node.Symbol))
+          return;
+
+        visited.Add(node.Symbol);
+        list.Add(node.Symbol);
+
+        foreach (var child in node.Children)
+          Walk(child);
+      }
+
+      Walk(root);
+      return list;
+    }
   }
 
+  /// <summary>
+  /// Resultado consolidado da análise da solution.
+  /// </summary>
   public class AnalyzeResult
   {
     public Compilation? Compilation { get; set; }
@@ -126,6 +192,9 @@ namespace TimeTrackerInjector.UI.Core
     public List<AnalyzedMethod> Methods { get; set; } = new();
   }
 
+  /// <summary>
+  /// Representa um método identificado durante a análise.
+  /// </summary>
   public class AnalyzedMethod
   {
     public string ClassName { get; set; } = "";
