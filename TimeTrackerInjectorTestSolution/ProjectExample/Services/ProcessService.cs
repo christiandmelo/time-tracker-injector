@@ -18,14 +18,14 @@ namespace ProjectExample.Services
             // For
             for (int i = 0; i < items.Count; i++)
             {
-                ProcessItem(items[i]);
+                ProcessItem(items[i], "for", 1);
                 Thread.Sleep(200);
             }
 
             // Foreach
             foreach (var item in items)
             {
-                ProcessItem(item);
+                ProcessItem(item, "foreach", 2);
                 Thread.Sleep(150);
             }
 
@@ -33,7 +33,7 @@ namespace ProjectExample.Services
             int index = 0;
             while (index < items.Count)
             {
-                ProcessItem(items[index]);
+                ProcessItem(items[index], "while", 3);
                 index++;
                 Thread.Sleep(100);
             }
@@ -41,12 +41,10 @@ namespace ProjectExample.Services
             _logService.Write("Processamento finalizado.");
         }
 
-        private void ProcessItem(Item item)
+        private void ProcessItem(Item item, string loop, int tax)
         {
-            _logService.Write($"Processando item {item.Id} - {item.Name}");
-            Thread.Sleep(120);
-            var value = _dataService.CalculateValue(item);
-            _logService.Write($"Valor calculado: {value}");
+            var value = _dataService.CalculateValue(item, tax);
+            _logService.Write($"{loop} - Processado item {item.Id} - {item.Name} - Valor calculado: {value}");
         }
     }
 }
