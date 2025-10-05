@@ -26,9 +26,9 @@ namespace ProjectExample.Services
     {
       Thread.Sleep(80);
 
-      baseValue = ChangeBaseValue(baseValue, tax);
+      var baseValue2 = ChangeBaseValue(baseValue, tax);
 
-      return baseValue * 1.15m;
+      return baseValue2 * 1.15m;
     }
 
     private decimal ChangeBaseValue(decimal baseValue, int tax)
@@ -36,16 +36,16 @@ namespace ProjectExample.Services
       switch (tax)
       {
         case 1:
-          Thread.Sleep(10);
+          Thread.Sleep(100);
           break;
         case 2:
-          Thread.Sleep(20);
+          Thread.Sleep(500);
           break;
         case 3:
-          Thread.Sleep(30);
+          Thread.Sleep(800);
           break;
         default:
-          Thread.Sleep(500);
+          Thread.Sleep(1500);
           break;
       }
 
