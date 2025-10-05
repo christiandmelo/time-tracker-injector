@@ -288,23 +288,38 @@ namespace TimeTrackerInjector.UI.Core
                  .Any(inv => ResolveTarget(inv) != null);
 
       // -----------------------
-      // Chamadas normais: Foo();
+      // baseValue = Foo(...);
       // -----------------------
       public override SyntaxNode? VisitExpressionStatement(ExpressionStatementSyntax node)
       {
-        if (node.Expression is not InvocationExpressionSyntax invocation)
-          return base.VisitExpressionStatement(node);
+        // caso 1: já cobre Foo();
+        if (node.Expression is InvocationExpressionSyntax invocation)
+        {
+          var target = ResolveTarget(invocation);
+          if (target != null)
+          {
+            var (start, stop) = BuildStartStop(target);
+            _wrapMap[node] = (start, stop);
+            _logCallback?.Invoke($"[MODIFY] {target.ContainingType.Name}.{target.Name} ({Path.GetFileName(_filePath)})");
+          }
+        }
 
-        var target = ResolveTarget(invocation);
-        if (target == null)
-          return base.VisitExpressionStatement(node);
+        // caso 2: cobre assignments
+        else if (node.Expression is AssignmentExpressionSyntax assign &&
+                 assign.Right is InvocationExpressionSyntax rightInvocation)
+        {
+          var target = ResolveTarget(rightInvocation);
+          if (target != null)
+          {
+            var (start, stop) = BuildStartStop(target);
+            _wrapMap[node] = (start, stop);
+            _logCallback?.Invoke($"[MODIFY] {target.ContainingType.Name}.{target.Name} (Assignment - {Path.GetFileName(_filePath)})");
+          }
+        }
 
-        var (start, stop) = BuildStartStop(target);
-        _wrapMap[node] = (start, stop);
-
-        _logCallback?.Invoke($"[MODIFY] {target.ContainingType.Name}.{target.Name} ({Path.GetFileName(_filePath)})");
         return base.VisitExpressionStatement(node);
       }
+
 
       // -----------------------
       // var x = Foo();
