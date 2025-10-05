@@ -13,11 +13,13 @@ using TimeTrackerInjector.UI.Core;
 namespace TimeTrackerInjector.UI.Core
 {
   /// <summary>
-  /// CodeRewriter - versão estável baseada em duas fases:
-  /// 1️⃣ Fase de mapeamento: identifica todos os pontos de injeção (Start/Stop).
-  /// 2️⃣ Fase de aplicação: reconstrói o corpo do método com todas as inserções.
+  /// CodeRewriter com duas fases:
+  /// 1️⃣ Mapeia todos os pontos de injeção (métodos e loops).
+  /// 2️⃣ Aplica as modificações de forma consolidada.
   /// 
-  /// Evita duplicações, blocos extras { }, e mantém a estrutura original.
+  /// - Sem blocos { } extras
+  /// - Sem duplicações
+  /// - Com suporte total a loops acumulativos
   /// </summary>
   public class CodeRewriter
   {
@@ -114,8 +116,12 @@ namespace TimeTrackerInjector.UI.Core
       private IMethodSymbol? _currentMethod;
       private bool _isInEntryPublic;
 
+      // armazenam os pontos de injeção detectados
       private readonly List<(StatementSyntax Target, StatementSyntax Start, StatementSyntax Stop)> _inserts = new();
+      private readonly List<(StatementSyntax LoopNode, StatementSyntax Start, StatementSyntax Stop, string LoopName)> _loopInserts = new();
+
       private readonly List<LogLine> _log = new();
+      private readonly List<string> _loopFields = new();
 
       public StableRewriter(
           SemanticModel semantic,
@@ -135,6 +141,7 @@ namespace TimeTrackerInjector.UI.Core
             SymbolEqualityComparer.Default);
       }
 
+      // Cria stopwatches no topo da classe base
       public override SyntaxNode? VisitClassDeclaration(ClassDeclarationSyntax node)
       {
         _currentClass = _semantic.GetDeclaredSymbol(node);
@@ -143,40 +150,50 @@ namespace TimeTrackerInjector.UI.Core
 
         var visitedMembers = node.Members.Select(m => (MemberDeclarationSyntax)Visit(m) ?? m).ToList();
 
-        // só declara os campos de Stopwatch na classe base
         if (!SymbolEqualityComparer.Default.Equals(_currentClass, _entryMethod.ContainingType))
           return node.WithMembers(SyntaxFactory.List(visitedMembers));
 
         var fieldDecls = new List<MemberDeclarationSyntax>();
+
         foreach (var kv in _stopwatches)
         {
-          var fieldDecl = SyntaxFactory.FieldDeclaration(
-              SyntaxFactory.VariableDeclaration(
-                  SyntaxFactory.ParseTypeName("System.Diagnostics.Stopwatch"),
-                  SyntaxFactory.SeparatedList(new[]
-                  {
-                                SyntaxFactory.VariableDeclarator(
-                                    SyntaxFactory.Identifier(kv.Value.FieldName),
-                                    null,
-                                    SyntaxFactory.EqualsValueClause(
-                                        SyntaxFactory.ObjectCreationExpression(
-                                            SyntaxFactory.ParseTypeName("System.Diagnostics.Stopwatch"))
-                                            .WithArgumentList(SyntaxFactory.ArgumentList())
-                                    ))
-                  })
-              ))
-          .WithModifiers(SyntaxFactory.TokenList(
-              SyntaxFactory.Token(SyntaxKind.InternalKeyword),
-              SyntaxFactory.Token(SyntaxKind.StaticKeyword),
-              SyntaxFactory.Token(SyntaxKind.ReadOnlyKeyword)));
-
+          var fieldDecl = CreateField(kv.Value.FieldName);
           fieldDecls.Add(fieldDecl);
         }
 
-        var finalMembers = new List<MemberDeclarationSyntax>(fieldDecls.Count + visitedMembers.Count);
+        foreach (var loop in _loopFields.Distinct())
+        {
+          var fieldDecl = CreateField(loop);
+          fieldDecls.Add(fieldDecl);
+        }
+
+        var finalMembers = new List<MemberDeclarationSyntax>();
         finalMembers.AddRange(fieldDecls);
         finalMembers.AddRange(visitedMembers);
         return node.WithMembers(SyntaxFactory.List(finalMembers));
+      }
+
+      private static FieldDeclarationSyntax CreateField(string name)
+      {
+        return SyntaxFactory.FieldDeclaration(
+            SyntaxFactory.VariableDeclaration(
+                SyntaxFactory.ParseTypeName("System.Diagnostics.Stopwatch"),
+                SyntaxFactory.SeparatedList(new[]
+                {
+                            SyntaxFactory.VariableDeclarator(
+                                SyntaxFactory.Identifier(name),
+                                null,
+                                SyntaxFactory.EqualsValueClause(
+                                    SyntaxFactory.ObjectCreationExpression(
+                                        SyntaxFactory.ParseTypeName("System.Diagnostics.Stopwatch"))
+                                        .WithArgumentList(SyntaxFactory.ArgumentList())
+                                ))
+                })
+            ))
+        .WithModifiers(SyntaxFactory.TokenList(
+            SyntaxFactory.Token(SyntaxKind.InternalKeyword),
+            SyntaxFactory.Token(SyntaxKind.StaticKeyword),
+            SyntaxFactory.Token(SyntaxKind.ReadOnlyKeyword)));
       }
 
       public override SyntaxNode? VisitMethodDeclaration(MethodDeclarationSyntax node)
@@ -190,6 +207,7 @@ namespace TimeTrackerInjector.UI.Core
 
         _isInEntryPublic = SymbolEqualityComparer.Default.Equals(_currentMethod, _entryMethod);
         _inserts.Clear();
+        _loopInserts.Clear();
         _log.Clear();
 
         var newBody = node.Body;
@@ -199,15 +217,28 @@ namespace TimeTrackerInjector.UI.Core
         // 1️⃣ Fase de mapeamento
         _ = base.Visit(newBody);
 
-        // 2️⃣ Fase de aplicação (aplica todas as inserções coletadas)
+        // 2️⃣ Fase de aplicação - loops primeiro
         var stmts = newBody.Statements.ToList();
-        foreach (var insert in _inserts.OrderByDescending(i => stmts.IndexOf(i.Target)))
+
+        foreach (var insert in _loopInserts.OrderByDescending(i => stmts.IndexOf(i.LoopNode)))
         {
-          var idx = stmts.IndexOf(insert.Target);
+          var idx = stmts.IndexOf(insert.LoopNode);
           if (idx >= 0)
           {
             stmts.Insert(idx, insert.Start);
             stmts.Insert(idx + 2, insert.Stop);
+          }
+        }
+
+        // 3️⃣ Aplicação normal de chamadas
+        foreach (var ins in _inserts.OrderByDescending(t => stmts.IndexOf(t.Target)))
+        {
+          var idx = stmts.IndexOf(ins.Target);
+          if (idx >= 0)
+          {
+            // Insere Start antes do alvo e Stop depois do alvo
+            stmts.Insert(idx, ins.Start);
+            stmts.Insert(idx + 2, ins.Stop);
           }
         }
 
@@ -222,7 +253,72 @@ namespace TimeTrackerInjector.UI.Core
         return node.WithBody(newBody);
       }
 
-      // 🧠 Fase 1 - apenas mapeia onde serão inseridos os blocos
+      // --- Detecção de loops com chamadas internas
+      public override SyntaxNode? VisitForEachStatement(ForEachStatementSyntax node)
+      {
+        if (ContainsTrackedInvocation(node.Statement))
+        {
+          var loopName = $"swLoop_{Guid.NewGuid().ToString("N")[..6]}";
+          _loopFields.Add(loopName);
+
+          var start = SyntaxFactory.ParseStatement($"{loopName}.Start();");
+          var stop = SyntaxFactory.ParseStatement($"{loopName}.Stop();");
+          _loopInserts.Add((node, start, stop, loopName));
+
+          _logCallback?.Invoke($"[MODIFY] Loop foreach ({Path.GetFileName(_filePath)})");
+          if (_isInEntryPublic)
+            _log.Add(LogLine.Loop(1, loopName));
+        }
+
+        return base.VisitForEachStatement(node);
+      }
+
+      public override SyntaxNode? VisitForStatement(ForStatementSyntax node)
+      {
+        if (ContainsTrackedInvocation(node.Statement))
+        {
+          var loopName = $"swLoop_{Guid.NewGuid().ToString("N")[..6]}";
+          _loopFields.Add(loopName);
+
+          var start = SyntaxFactory.ParseStatement($"{loopName}.Start();");
+          var stop = SyntaxFactory.ParseStatement($"{loopName}.Stop();");
+          _loopInserts.Add((node, start, stop, loopName));
+
+          _logCallback?.Invoke($"[MODIFY] Loop for ({Path.GetFileName(_filePath)})");
+          if (_isInEntryPublic)
+            _log.Add(LogLine.Loop(1, loopName));
+        }
+
+        return base.VisitForStatement(node);
+      }
+
+      public override SyntaxNode? VisitWhileStatement(WhileStatementSyntax node)
+      {
+        if (ContainsTrackedInvocation(node.Statement))
+        {
+          var loopName = $"swLoop_{Guid.NewGuid().ToString("N")[..6]}";
+          _loopFields.Add(loopName);
+
+          var start = SyntaxFactory.ParseStatement($"{loopName}.Start();");
+          var stop = SyntaxFactory.ParseStatement($"{loopName}.Stop();");
+          _loopInserts.Add((node, start, stop, loopName));
+
+          _logCallback?.Invoke($"[MODIFY] Loop while ({Path.GetFileName(_filePath)})");
+          if (_isInEntryPublic)
+            _log.Add(LogLine.Loop(1, loopName));
+        }
+
+        return base.VisitWhileStatement(node);
+      }
+
+      private bool ContainsTrackedInvocation(StatementSyntax stmt)
+      {
+        return stmt.DescendantNodes()
+            .OfType<InvocationExpressionSyntax>()
+            .Any(inv => ResolveTarget(inv) != null);
+      }
+
+      // --- Detecção normal de chamadas
       public override SyntaxNode? VisitExpressionStatement(ExpressionStatementSyntax node)
       {
         if (node.Expression is not InvocationExpressionSyntax invocation)
@@ -311,8 +407,12 @@ namespace TimeTrackerInjector.UI.Core
         foreach (var l in _log)
         {
           var bars = new string('|', l.Depth * 2);
-          stmts.Add(SyntaxFactory.ParseStatement(
-              $"logStopwatch.AppendLine($\"{bars}[Metodo: {l.MethodName}] Tempo: {{{l.StopwatchRef}.ElapsedMilliseconds}} ms - {{{l.StopwatchRef}.Elapsed}}\");"));
+          if (l.IsLoop)
+            stmts.Add(SyntaxFactory.ParseStatement(
+                $"logStopwatch.AppendLine($\"{bars}[Loop: {l.StopwatchRef}] Tempo: {{{l.StopwatchRef}.ElapsedMilliseconds}} ms - {{{l.StopwatchRef}.Elapsed}}\");"));
+          else
+            stmts.Add(SyntaxFactory.ParseStatement(
+                $"logStopwatch.AppendLine($\"{bars}[Metodo: {l.MethodName}] Tempo: {{{l.StopwatchRef}.ElapsedMilliseconds}} ms - {{{l.StopwatchRef}.Elapsed}}\");"));
         }
 
         return stmts;
@@ -327,6 +427,8 @@ namespace TimeTrackerInjector.UI.Core
 
         public static LogLine Method(int depth, string name, string sw)
             => new() { Depth = depth, MethodName = name, StopwatchRef = sw };
+        public static LogLine Loop(int depth, string sw)
+            => new() { Depth = depth, StopwatchRef = sw, IsLoop = true };
       }
     }
   }
